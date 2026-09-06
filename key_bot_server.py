@@ -4,8 +4,12 @@ import hmac
 import hashlib
 import base64
 import json
+import sqlite3
 import logging
-from datetime import datetime, timedelta
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -21,21 +25,65 @@ from telegram.ext import (
 # ==========================================
 BOT_TOKEN = "8837984790:AAEv-6X9s1msqK94O0NeBL3pD8WZnLbE8qY"
 SECRET_SERVER_KEY = b"SEGLOCK_PRO_ULTIMATE_HMAC_MASTER_KEY_2026_X99"
-ADMIN_IDS = []  # Add Telegram user IDs of admins here
+DB_PATH = "keys.db"
+HTTP_PORT = 8080
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Database storing keys: key -> {uid, exp, created_at, plan}
-KEYS_DB = {}
+# ==========================================
+# SQLITE DATABASE STORAGE
+# ==========================================
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS keys (
+            license_key TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            exp_timestamp INTEGER NOT NULL,
+            exp_str TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def db_save_key(license_key: str, user_id: int, exp_timestamp: int, exp_str: str, plan_name: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    created_at = datetime.now().strftime('%d.%m.%Y %H:%M')
+    cursor.execute('''
+        INSERT OR REPLACE INTO keys (license_key, user_id, exp_timestamp, exp_str, plan_name, created_at, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+    ''', (license_key, user_id, exp_timestamp, exp_str, plan_name, created_at))
+    conn.commit()
+    conn.close()
+
+def db_get_user_keys(user_id: int) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT license_key, exp_str, plan_name FROM keys WHERE user_id = ? AND is_active = 1', (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"key": r[0], "exp_str": r[1], "plan": r[2]} for r in rows]
+
+def db_count_keys() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM keys')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+# Initialize SQLite database immediately
+init_db()
 
 # ==========================================
-# CRYPTO KEYGEN LOGIC
+# CRYPTO KEYGEN & VERIFICATION ENGINE
 # ==========================================
 def generate_license_key(user_id: int, duration_hours: int, plan_name: str = "custom") -> tuple[str, str]:
-    """
-    Generates a secure cryptographically signed key for SegLock application.
-    Format: SEG-<BASE64_PAYLOAD>-<HMAC_SIG>
-    """
     if duration_hours == -1:
         expire_timestamp = int(time.time()) + (3650 * 24 * 3600)  # ~10 years
         exp_str = "Навсегда (Lifetime)"
@@ -55,20 +103,12 @@ def generate_license_key(user_id: int, duration_hours: int, plan_name: str = "cu
     
     license_key = f"SEG-{payload_b64}-{signature}"
     
-    KEYS_DB[license_key] = {
-        "uid": user_id,
-        "exp": expire_timestamp,
-        "exp_str": exp_str,
-        "created_at": datetime.now().strftime('%d.%m.%Y %H:%M'),
-        "plan": plan_name
-    }
+    # Save key persistently into SQLite DB
+    db_save_key(license_key, user_id, expire_timestamp, exp_str, plan_name)
     
     return license_key, exp_str
 
 def verify_license_key(license_key: str) -> dict:
-    """
-    Validates the structure and HMAC signature of a key.
-    """
     try:
         parts = license_key.strip().split('-')
         if len(parts) != 3 or parts[0] != "SEG":
@@ -97,6 +137,43 @@ def verify_license_key(license_key: str) -> dict:
         }
     except Exception as e:
         return {"valid": False, "reason": f"❌ Ошибка проверки: {str(e)}"}
+
+# ==========================================
+# HTTP API SERVER FOR ANDROID APP SYNC
+# ==========================================
+class AppSyncHTTPHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/api/verify_key":
+            query_params = parse_qs(parsed_path.query)
+            key = query_params.get("key", [None])[0]
+            
+            if not key:
+                response = {"valid": False, "reason": "Missing key parameter"}
+            else:
+                response = verify_license_key(key)
+                
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'{"error": "Endpoint not found"}')
+
+    def log_message(self, format, *args):
+        return  # Silence standard HTTP logs
+
+def start_http_api_server():
+    server = HTTPServer(("0.0.0.0", HTTP_PORT), AppSyncHTTPHandler)
+    logging.info(f"[+] HTTP API Sync Server running on port {HTTP_PORT}...")
+    server.serve_forever()
+
+# Start HTTP Server in background thread
+http_thread = threading.Thread(target=start_http_api_server, daemon=True)
+http_thread.start()
 
 # ==========================================
 # TELEGRAM BOT HANDLERS
@@ -147,7 +224,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             "💳 **Выбор тарифа подписки SegLock Pro**\n\n"
-            "После оплаты ключ генерируется автоматически и привязывается к твоему профилю.\n\n"
+            "После оплаты ключ генерируется автоматически и сохраняется в базе данных.\n\n"
             "Выбери подходящий период:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
@@ -156,16 +233,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("buy_"):
         plan_code = data.replace("buy_", "")
         plans = {
-            "1h": (1, "1 Час", "150 ₽"),
-            "24h": (24, "24 Часа", "490 ₽"),
-            "3d": (72, "3 Дня", "990 ₽"),
-            "7d": (168, "7 Дней", "1890 ₽"),
-            "30d": (720, "30 Дней", "3490 ₽"),
-            "life": (-1, "Навсегда (Lifetime)", "7990 ₽")
+            "1h": (1, "1 Час"),
+            "24h": (24, "24 Часа"),
+            "3d": (72, "3 Дня"),
+            "7d": (168, "7 Дней"),
+            "30d": (720, "30 Дней"),
+            "life": (-1, "Навсегда (Lifetime)")
         }
         
         if plan_code in plans:
-            hours, plan_name, price = plans[plan_code]
+            hours, plan_name = plans[plan_code]
             key, exp_str = generate_license_key(user_id, hours, plan_name)
             
             keyboard = [[InlineKeyboardButton("⬅️ В главное меню", callback_data="main_menu")]]
@@ -181,7 +258,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data == "my_keys":
-        user_keys = {k: v for k, v in KEYS_DB.items() if v["uid"] == user_id}
+        user_keys = db_get_user_keys(user_id)
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]
         
         if not user_keys:
@@ -191,9 +268,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         else:
-            msg = "🔑 **Ваши приобретенные ключи:**\n\n"
-            for k, info in user_keys.items():
-                msg += f"• Тариф: **{info['plan']}**\n  Ключ: `{k}`\n  Действует до: `{info['exp_str']}`\n\n"
+            msg = "🔑 **Ваши сохраненные ключи (из БД):**\n\n"
+            for item in user_keys:
+                msg += f"• Тариф: **{item['plan']}**\n  Ключ: `{item['key']}`\n  Действует до: `{item['exp_str']}`\n\n"
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data == "verify_prompt":
@@ -206,14 +283,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "system_status":
-        total_keys = len(KEYS_DB)
+        total_keys = db_count_keys()
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]
         status_msg = (
             f"📊 **Статус серверов SegLock Pro Network**\n\n"
             f"🟢 **Основной нод (Crypto Core):** Работает\n"
-            f"🟢 **Сервер авторизации HMAC:** Online (100% Uptime)\n"
-            f"🟢 **База валидации:** Синхронизирована\n\n"
-            f"📈 Всего выписано ключей: **{total_keys}**\n"
+            f"🟢 **База данных SQLite (keys.db):** Подключена\n"
+            f"🟢 **HTTP API синхронизации приложения:** Online (Port {HTTP_PORT})\n\n"
+            f"📈 Всего выписано и сохранено ключей: **{total_keys}**\n"
             f"🔒 Шифрование: **HMAC-SHA256 / 2026 Standard**"
         )
         await query.edit_message_text(status_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -221,12 +298,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "instructions":
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]
         inst_msg = (
-            "📖 **Инструкция по запуск и настройке SegLock Pro:**\n\n"
+            "📖 **Инструкция по запуску и настройке SegLock Pro:**\n\n"
             "1️⃣ Скачайте и установите собранный APK-файл SegLock Pro.\n"
-            "2️⃣ При старте приложения разрешите доступ к **Bluetooth** и **Геолокации** (требование Android BLE).\n"
+            "2️⃣ При старте приложения разрешите доступ к **Bluetooth** и **Геолокации**.\n"
             "3️⃣ В появившемся окне активации вставьте полученный ключ `SEG-...`.\n"
             "4️⃣ Нажмите **VERIFY KEY** — статус сменится на «Подключено».\n"
-            "5️⃣ Перейдите на вкладку **AutoScan** для автоматического поиска девайсов или введите данные в **Manual Key**."
+            "5️⃣ Перейдите на вкладку **AutoScan** для поиска девайсов или введите данные в **Manual Key**."
         )
         await query.edit_message_text(inst_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -261,14 +338,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 def main():
-    print(f"[+] Launching SegLock Pro KeyBot with token: {BOT_TOKEN[:15]}...")
+    print(f"[+] Launching SegLock Pro KeyBot with SQLite DB and HTTP API Sync Server...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    print("[+] Bot is now online and listening for requests!")
+    print("[+] Bot & HTTP Sync API online!")
     app.run_polling()
 
 if __name__ == "__main__":
