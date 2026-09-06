@@ -1,0 +1,9 @@
+# Large binaries and decompiles
+*.apk
+*.zip
+base.apk/
+lostbot/
+ninehack/
+__pycache__/
+*.pyc
+.env
