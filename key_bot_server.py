@@ -299,7 +299,8 @@ def main_menu_keyboard(user_id: int):
     keyboard = [
         [InlineKeyboardButton("⭐ Купить за Telegram Stars", callback_data="buy_menu"), InlineKeyboardButton("🔑 Мои ключи", callback_data="my_keys")],
         [InlineKeyboardButton("🔍 Проверить ключ", callback_data="verify_prompt"), InlineKeyboardButton("📊 Статус системы", callback_data="system_status")],
-        [InlineKeyboardButton("📖 Инструкция", callback_data="instructions"), InlineKeyboardButton("💬 Поддержка", callback_data="support")]
+        [InlineKeyboardButton("📖 Инструкция", callback_data="instructions"), InlineKeyboardButton("💬 Поддержка", callback_data="support")],
+        [InlineKeyboardButton("📢 Канал @SegLock", url="https://t.me/SegLock"), InlineKeyboardButton("👨‍💻 Саппорт @SegLockSupport", url="https://t.me/SegLockSupport")]
     ]
     if user_id in ADMIN_IDS:
         keyboard.append([InlineKeyboardButton("👑 Админ Панель", callback_data="admin_panel")])
@@ -417,12 +418,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(inst_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data == "support":
-        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]
+        keyboard = [
+            [InlineKeyboardButton("📢 Официальный Канал @SegLock", url="https://t.me/SegLock")],
+            [InlineKeyboardButton("💬 Написать в Поддержку @SegLockSupport", url="https://t.me/SegLockSupport")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+        ]
         supp_msg = (
-            "💬 **Служба поддержки SegLock Pro**\n\n"
-            "По всем вопросам работы софта, оплаты и техническим проблемам обращайтесь в поддержку:\n\n"
-            "👨‍💻 **Главный администратор:** [Artem](tg://user?id=7772296423)\n"
-            "⏱ Время работы: **24/7**"
+            "💬 **Служба поддержки & Канал SegLock Pro**\n\n"
+            "📢 **Официальный канал:** @SegLock\n"
+            "👨‍💻 **Техническая поддержка:** @SegLockSupport\n"
+            "👑 **Главный администратор:** [Artem](tg://user?id=7772296423)\n\n"
+            "⏱ Время работы поддержки: **24/7**"
         )
         await query.edit_message_text(supp_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
