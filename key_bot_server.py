@@ -31,7 +31,7 @@ from telegram.ext import (
 # ==========================================
 BOT_TOKEN = "8837984790:AAEv-6X9s1msqK94O0NeBL3pD8WZnLbE8qY"
 SECRET_SERVER_KEY = b"SEGLOCK_PRO_ULTIMATE_HMAC_MASTER_KEY_2026_X99"
-ADMIN_IDS = [7772296423]  # Admin Telegram User ID
+MASTER_ADMIN_IDS = [7772296423]  # Super Admin Telegram User ID
 DB_PATH = "keys.db"
 HTTP_PORT = 8080
 
@@ -46,7 +46,7 @@ DEFAULT_STARS_PRICES = {
 }
 
 # ==========================================
-# SQLITE DATABASE STORAGE & REVENUE TABLE
+# SQLITE DATABASE STORAGE & ADMIN MANAGEMENT
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -85,15 +85,78 @@ def init_db():
             stars INTEGER NOT NULL
         )
     ''')
+
+    # Dynamic admins table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            added_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    ''')
     
     # Populate default prices if empty
     cursor.execute('SELECT COUNT(*) FROM price_config')
     if cursor.fetchone()[0] == 0:
         for code, info in DEFAULT_STARS_PRICES.items():
             cursor.execute('INSERT INTO price_config VALUES (?, ?, ?, ?)', (code, info["hours"], info["name"], info["stars"]))
+
+    # Populate super admins
+    for admin_id in MASTER_ADMIN_IDS:
+        cursor.execute('INSERT OR IGNORE INTO admins VALUES (?, 0, ?)', (admin_id, datetime.now().strftime('%d.%m.%Y %H:%M')))
             
     conn.commit()
     conn.close()
+
+def db_is_admin(user_id: int) -> bool:
+    if user_id in MASTER_ADMIN_IDS:
+        return True
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM admins WHERE user_id = ?', (user_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def db_add_admin(user_id: int, added_by: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    created_at = datetime.now().strftime('%d.%m.%Y %H:%M')
+    try:
+        cursor.execute('INSERT OR REPLACE INTO admins VALUES (?, ?, ?)', (user_id, added_by, created_at))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+def db_remove_admin(user_id: int) -> bool:
+    if user_id in MASTER_ADMIN_IDS:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM admins WHERE user_id = ?', (user_id,))
+    affected = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return affected
+
+def db_get_admins() -> list:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id, added_by, created_at FROM admins')
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"user_id": r[0], "added_by": r[1], "created_at": r[2]} for r in rows]
+
+def db_get_all_users() -> list:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT DISTINCT user_id FROM keys UNION SELECT DISTINCT user_id FROM payments')
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows if r[0]]
 
 def db_get_prices() -> dict:
     conn = sqlite3.connect(DB_PATH)
@@ -302,7 +365,7 @@ def main_menu_keyboard(user_id: int):
         [InlineKeyboardButton("📖 Инструкция", callback_data="instructions"), InlineKeyboardButton("💬 Поддержка", callback_data="support")],
         [InlineKeyboardButton("📢 Канал @SegLock", url="https://t.me/SegLock"), InlineKeyboardButton("👨‍💻 Саппорт @SegLockSupport", url="https://t.me/SegLockSupport")]
     ]
-    if user_id in ADMIN_IDS:
+    if db_is_admin(user_id):
         keyboard.append([InlineKeyboardButton("👑 Админ Панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -401,7 +464,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🟢 **Оплата Telegram Stars (XTR):** Активна\n"
             f"🟢 **HTTP API синхронизации:** Online (Port {HTTP_PORT})\n\n"
             f"📈 Всего ключей: **{total_keys}** | Заработано: **{revenue['total_stars']} ⭐️**\n"
-            f"👑 Главный админ: `7772296423`"
+            f"👑 Со-админов в сети: **{len(db_get_admins())}**"
         )
         await query.edit_message_text(status_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -432,24 +495,66 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(supp_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # ADMIN PANEL HANDLERS
-    elif data == "admin_panel" and user_id in ADMIN_IDS:
+    # ================= =========================
+    # ADVANCED ADMIN PANEL HANDLERS & MANAGEMENT
+    # ==========================================
+    elif data == "admin_panel" and db_is_admin(user_id):
         keyboard = [
-            [InlineKeyboardButton("📈 Таблица Доходов", callback_data="admin_revenue_stats"), InlineKeyboardButton("✏️ Изменить Цены", callback_data="admin_change_prices")],
-            [InlineKeyboardButton("👑 Создать бесплатный ключ", callback_data="admin_gen_key"), InlineKeyboardButton("📋 Ключи в БД", callback_data="admin_list_keys")],
-            [InlineKeyboardButton("🚫 Отозвать ключ", callback_data="admin_revoke_prompt")],
-            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+            [InlineKeyboardButton("📈 Доходы и Статистика", callback_data="admin_revenue_stats"), InlineKeyboardButton("✏️ Изменить Цены", callback_data="admin_change_prices")],
+            [InlineKeyboardButton("➕ Добавить Админа", callback_data="adm_add_prompt"), InlineKeyboardButton("➖ Удалить Админа", callback_data="adm_del_prompt")],
+            [InlineKeyboardButton("👑 Создать Ключ", callback_data="admin_gen_key"), InlineKeyboardButton("📋 Ключи в БД", callback_data="admin_list_keys")],
+            [InlineKeyboardButton("📢 Рассылка Сообщения", callback_data="adm_broadcast_prompt"), InlineKeyboardButton("🚫 Отозвать Ключ", callback_data="admin_revoke_prompt")],
+            [InlineKeyboardButton("👥 Список Админов", callback_data="adm_list_admins"), InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
         ]
         await query.edit_message_text(
-            f"👑 **ПАНЕЛЬ АДМИНИСТРАТОРА (ID: {user_id})**\n\n"
-            f"Всего ключей в БД: **{db_count_keys()}**\n"
-            f"Всего заработано Звёзд: **{db_get_revenue_report()['total_stars']} ⭐️**\n\n"
+            f"👑 **ПАНЕЛЬ УПРАВЛЕНИЯ АДМИНИСТРАТОРА (ID: {user_id})**\n\n"
+            f"🔑 Ключей в БД: **{db_count_keys()}**\n"
+            f"⭐️ Заработано Звёзд: **{db_get_revenue_report()['total_stars']} ⭐️**\n"
+            f"👥 Со-админов: **{len(db_get_admins())}**\n\n"
             f"Выберите действие:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
-    elif data == "admin_revenue_stats" and user_id in ADMIN_IDS:
+    elif data == "adm_add_prompt" and db_is_admin(user_id):
+        context.user_data["awaiting_admin_add"] = True
+        keyboard = [[InlineKeyboardButton("⬅️ Назад в админку", callback_data="admin_panel")]]
+        await query.edit_message_text(
+            "➕ **Добавление нового Администратора**\n\n"
+            "Отправьте Telegram User ID нового админа (например: `123456789`) или команда `/addadmin 123456789`:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data == "adm_del_prompt" and db_is_admin(user_id):
+        context.user_data["awaiting_admin_del"] = True
+        keyboard = [[InlineKeyboardButton("⬅️ Назад в админку", callback_data="admin_panel")]]
+        await query.edit_message_text(
+            "➖ **Удаление Администратора**\n\n"
+            "Отправьте Telegram User ID админа для лишения прав или команда `/deladmin 123456789`:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data == "adm_list_admins" and db_is_admin(user_id):
+        admins = db_get_admins()
+        keyboard = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin_panel")]]
+        msg = "👥 **Список администраторов системы:**\n\n"
+        for adm in admins:
+            msg += f"• ID: `{adm['user_id']}` | Добавил: `{adm['added_by']}` | `{adm['created_at']}`\n"
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif data == "adm_broadcast_prompt" and db_is_admin(user_id):
+        context.user_data["awaiting_broadcast"] = True
+        keyboard = [[InlineKeyboardButton("⬅️ Назад в админку", callback_data="admin_panel")]]
+        await query.edit_message_text(
+            "📢 **Массовая рассылка всем пользователям**\n\n"
+            "Введите текст сообщения, которое будет отправлено всем юзерам бота:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data == "admin_revenue_stats" and db_is_admin(user_id):
         report = db_get_revenue_report()
         keyboard = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin_panel")]]
         
@@ -467,7 +572,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    elif data == "admin_change_prices" and user_id in ADMIN_IDS:
+    elif data == "admin_change_prices" and db_is_admin(user_id):
         current_prices = db_get_prices()
         keyboard = [
             [InlineKeyboardButton(f"1 День ({current_prices['24h']['stars']} ⭐️)", callback_data="adm_editprice_24h")],
@@ -478,74 +583,75 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text("✏️ **Выберите тариф для изменения цены в Звёздах (⭐️):**", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data.startswith("adm_editprice_") and user_id in ADMIN_IDS:
+    elif data.startswith("adm_editprice_") and db_is_admin(user_id):
         plan_code = data.replace("adm_editprice_", "")
         context.user_data["editing_price_plan"] = plan_code
-        keyboard = [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_change_prices")]]
+        keyboard = [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_panel")]]
         await query.edit_message_text(
-            f"✏️ **Изменение цены для тарифа `{plan_code}`**\n\n"
-            f"Отправьте новую стоимость в Звёздах (числом):",
+            f"✏️ **Введите новую цену в Звёздах (⭐️) для тарифа `{plan_code}`:**",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
-    elif data == "admin_gen_key" and user_id in ADMIN_IDS:
+    elif data == "admin_gen_key" and db_is_admin(user_id):
         keyboard = [
-            [InlineKeyboardButton("1 День", callback_data="adm_gen_24h"), InlineKeyboardButton("7 Дней", callback_data="adm_gen_7d")],
-            [InlineKeyboardButton("30 Дней", callback_data="adm_gen_30d"), InlineKeyboardButton("👑 Lifetime", callback_data="adm_gen_life")],
-            [InlineKeyboardButton("⬅️ Назад в админку", callback_data="admin_panel")]
+            [InlineKeyboardButton("⏳ 1 День", callback_data="adm_gen_24h"), InlineKeyboardButton("🗓 7 Дней", callback_data="adm_gen_7d")],
+            [InlineKeyboardButton("🚀 30 Дней", callback_data="adm_gen_30d"), InlineKeyboardButton("👑 Навсегда", callback_data="adm_gen_life")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="admin_panel")]
         ]
-        await query.edit_message_text("👑 **Выбери срок действия админ-ключа:**", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("👑 **Выдача бесплатного админ-ключа:**\n\nВыберите срок действия:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data.startswith("adm_gen_") and user_id in ADMIN_IDS:
-        plan_code = data.replace("adm_gen_", "")
-        plans = db_get_prices()
-        if plan_code in plans:
-            info = plans[plan_code]
-            key, exp_str = generate_license_key(user_id, info["hours"], f"Admin ({info['name']})")
-            keyboard = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin_panel")]]
-            await query.edit_message_text(
-                f"✅ **АДМИН-КЛЮЧ СГЕНЕРИРОВАН:**\n\n"
-                f"`{key}`\n\n"
-                f"📌 Тариф: **{info['name']}**\n"
-                f"⏱ Срок: **{exp_str}**",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-
-    elif data == "admin_list_keys" and user_id in ADMIN_IDS:
-        keys_list = db_get_all_keys()
+    elif data.startswith("adm_gen_") and db_is_admin(user_id):
+        code = data.replace("adm_gen_", "")
+        duration_map = {"24h": 24, "7d": 168, "30d": 720, "life": -1}
+        hours = duration_map.get(code, 24)
+        
+        key, exp_str = generate_license_key(user_id, hours, f"Admin Free ({code})")
         keyboard = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin_panel")]]
-        if not keys_list:
-            await query.edit_message_text("В базе данных пока нет ключей.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            f"✅ **КЛЮЧ УСПЕШНО СГЕНЕРИРОВАН!**\n\n"
+            f"🔑 `{key}`\n\n"
+            f"⏱ Действителен до: **{exp_str}**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data == "admin_list_keys" and db_is_admin(user_id):
+        keys = db_get_all_keys()
+        keyboard = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin_panel")]]
+        if not keys:
+            await query.edit_message_text("📋 База данных ключей пуста.", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            msg = "📋 **Последние ключи в БД:**\n\n"
-            for k in keys_list[:15]:
-                status = "🟢" if k["active"] == 1 else "🔴"
-                msg += f"{status} `{k['key']}` | UID: `{k['uid']}` | До: {k['exp_str']}\n"
+            msg = "📋 **Последние 50 ключей в БД:**\n\n"
+            for k in keys[:15]:
+                status_icon = "🟢" if k["active"] == 1 else "🔴"
+                msg += f"{status_icon} `{k['key']}` | UID: `{k['uid']}` | {k['exp_str']}\n"
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    elif data == "admin_revoke_prompt" and user_id in ADMIN_IDS:
+    elif data == "admin_revoke_prompt" and db_is_admin(user_id):
         context.user_data["awaiting_revoke_key"] = True
         keyboard = [[InlineKeyboardButton("⬅️ Отмена", callback_data="admin_panel")]]
         await query.edit_message_text(
-            "🚫 **Отзыв / Блокировка ключа**\n\nОтправьте мне ключ `SEG-...`, который нужно заблокировать:",
+            "🚫 **Блокировка / Отзыв ключа**\n\nОтправьте мне ключ `SEG-...` для моментальной блокировки доступа:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
 # ==========================================
-# TELEGRAM STARS PAYMENT HANDLERS
+# PAYMENT PRECHECKOUT & SUCCESS HANDLERS
 # ==========================================
 async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
-    await query.answer(ok=True)
+    if not query.invoice_payload.startswith("seglock_pay_"):
+        await query.answer(ok=False, error_message="Неверная сигнатура платежа.")
+    else:
+        await query.answer(ok=True)
 
 async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    payment = update.message.successful_payment
-    payload = payment.invoice_payload
     user_id = update.effective_user.id
-    stars_amount = payment.total_amount
+    payment_info = update.message.successful_payment
+    payload = payment_info.invoice_payload
+    stars_amount = payment_info.total_amount
     
     parts = payload.split('_')
     plan_code = parts[2] if len(parts) >= 3 else "24h"
@@ -568,13 +674,80 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text(success_msg, parse_mode="Markdown")
 
 # ==========================================
-# TEXT MESSAGES & ADMIN EDIT HANDLERS
+# COMMANDS & TEXT MESSAGES HANDLERS
 # ==========================================
+async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not db_is_admin(user_id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: `/addadmin <TELEGRAM_USER_ID>`", parse_mode="Markdown")
+        return
+    try:
+        target_id = int(context.args[0])
+        db_add_admin(target_id, user_id)
+        await update.message.reply_text(f"✅ Пользователь `{target_id}` назначен администратором!", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("❌ Введите корректный числовой Telegram User ID.")
+
+async def deladmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not db_is_admin(user_id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: `/deladmin <TELEGRAM_USER_ID>`", parse_mode="Markdown")
+        return
+    try:
+        target_id = int(context.args[0])
+        success = db_remove_admin(target_id)
+        if success:
+            await update.message.reply_text(f"✅ Администратор `{target_id}` удален!", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"❌ Нельзя удалить данного пользователя или он не является админом.")
+    except ValueError:
+        await update.message.reply_text("❌ Введите корректный числовой Telegram User ID.")
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    if context.user_data.get("editing_price_plan") and user_id in ADMIN_IDS:
+    if context.user_data.get("awaiting_admin_add") and db_is_admin(user_id):
+        context.user_data["awaiting_admin_add"] = False
+        try:
+            target_id = int(text)
+            db_add_admin(target_id, user_id)
+            await update.message.reply_text(f"✅ Пользователь `{target_id}` успешно добавлен в список администраторов!", parse_mode="Markdown")
+        except ValueError:
+            await update.message.reply_text("❌ Введите числовой Telegram User ID.")
+        return
+
+    if context.user_data.get("awaiting_admin_del") and db_is_admin(user_id):
+        context.user_data["awaiting_admin_del"] = False
+        try:
+            target_id = int(text)
+            success = db_remove_admin(target_id)
+            if success:
+                await update.message.reply_text(f"✅ Администратор `{target_id}` удален!", parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"❌ Нельзя удалить данного пользователя.")
+        except ValueError:
+            await update.message.reply_text("❌ Введите числовой Telegram User ID.")
+        return
+
+    if context.user_data.get("awaiting_broadcast") and db_is_admin(user_id):
+        context.user_data["awaiting_broadcast"] = False
+        users = db_get_all_users()
+        sent_count = 0
+        for uid in users:
+            try:
+                await context.bot.send_message(chat_id=uid, text=f"📢 **Сообщение от администрации SegLock:**\n\n{text}", parse_mode="Markdown")
+                sent_count += 1
+            except Exception:
+                pass
+        await update.message.reply_text(f"✅ Рассылка завершена! Успешно доставлено: **{sent_count}** пользователям.", parse_mode="Markdown")
+        return
+
+    if context.user_data.get("editing_price_plan") and db_is_admin(user_id):
         plan_code = context.user_data["editing_price_plan"]
         context.user_data["editing_price_plan"] = None
         try:
@@ -592,7 +765,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка: Введите корректное число Звёзд.")
         return
 
-    if context.user_data.get("awaiting_revoke_key") and user_id in ADMIN_IDS:
+    if context.user_data.get("awaiting_revoke_key") and db_is_admin(user_id):
         context.user_data["awaiting_revoke_key"] = False
         revoked = db_revoke_key(text)
         keyboard = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin_panel")]]
@@ -622,35 +795,39 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
+    if not db_is_admin(user_id):
         return
     keyboard = [
-        [InlineKeyboardButton("📈 Таблица Доходов", callback_data="admin_revenue_stats"), InlineKeyboardButton("✏️ Изменить Цены", callback_data="admin_change_prices")],
-        [InlineKeyboardButton("👑 Создать бесплатный ключ", callback_data="admin_gen_key"), InlineKeyboardButton("📋 Ключи в БД", callback_data="admin_list_keys")],
-        [InlineKeyboardButton("🚫 Отозвать ключ", callback_data="admin_revoke_prompt")],
-        [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        [InlineKeyboardButton("📈 Доходы и Статистика", callback_data="admin_revenue_stats"), InlineKeyboardButton("✏️ Изменить Цены", callback_data="admin_change_prices")],
+        [InlineKeyboardButton("➕ Добавить Админа", callback_data="adm_add_prompt"), InlineKeyboardButton("➖ Удалить Админа", callback_data="adm_del_prompt")],
+        [InlineKeyboardButton("👑 Создать Ключ", callback_data="admin_gen_key"), InlineKeyboardButton("📋 Ключи в БД", callback_data="admin_list_keys")],
+        [InlineKeyboardButton("📢 Рассылка Сообщения", callback_data="adm_broadcast_prompt"), InlineKeyboardButton("🚫 Отозвать Ключ", callback_data="admin_revoke_prompt")],
+        [InlineKeyboardButton("👥 Список Админов", callback_data="adm_list_admins"), InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
     ]
     await update.message.reply_text(
-        f"👑 **ПАНЕЛЬ АДМИНИСТРАТОРА (ID: {user_id})**\n\n"
-        f"Всего ключей в БД: **{db_count_keys()}**\n"
-        f"Всего заработано Звёзд: **{db_get_revenue_report()['total_stars']} ⭐️**\n\n"
+        f"👑 **ПАНЕЛЬ УПРАВЛЕНИЯ АДМИНИСТРАТОРА (ID: {user_id})**\n\n"
+        f"🔑 Ключей в БД: **{db_count_keys()}**\n"
+        f"⭐️ Заработано Звёзд: **{db_get_revenue_report()['total_stars']} ⭐️**\n"
+        f"👥 Со-админов: **{len(db_get_admins())}**\n\n"
         f"Выберите действие:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
 
 def main():
-    print(f"[+] Launching SegLock Pro KeyBot v3.0 (Dynamic Prices & Revenue Analytics)...")
+    print(f"[+] Launching SegLock Pro KeyBot v3.5 (Multi-Admin Engine & Dynamic Database)...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("addadmin", addadmin_command))
+    app.add_handler(CommandHandler("deladmin", deladmin_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    print(f"[+] Admin ID: {ADMIN_IDS} | Prices & Revenue Analytics Loaded | HTTP Port: {HTTP_PORT}")
+    print(f"[+] Multi-Admin Management Ready | HTTP Port: {HTTP_PORT}")
     app.run_polling()
 
 if __name__ == "__main__":
